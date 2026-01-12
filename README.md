@@ -10,7 +10,7 @@ FadeTail adalah aplikasi Flutter untuk membantu menormalkan bagian akhir audio s
 
 ## Ikon Aplikasi
 
-![Icon Flutter](https://raw.githubusercontent.com/Ian7672/fts-flutter/main/assets/icon/icon.png)
+<img src="https://raw.githubusercontent.com/Ian7672/fts-flutter/main/assets/icon/icon.png" width="128" alt="FadeTail Icon">
 
 Sumber ikon: [Flaticon – Wave Icon](https://www.flaticon.com/free-icon/wave_11710770?term=audio&page=1&position=31&origin=search&related_id=11710770)
 
