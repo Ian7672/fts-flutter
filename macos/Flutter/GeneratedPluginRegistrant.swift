@@ -6,7 +6,7 @@ import FlutterMacOS
 import Foundation
 
 import desktop_drop
-import ffmpeg_kit_flutter_audio
+import ffmpeg_kit_audio_flutter
 import file_picker
 import path_provider_foundation
 import shared_preferences_foundation

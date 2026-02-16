@@ -2,10 +2,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import 'package:ffmpeg_kit_flutter_audio/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_flutter_audio/ffprobe_kit.dart';
-import 'package:ffmpeg_kit_flutter_audio/return_code.dart';
-import 'package:ffmpeg_kit_flutter_audio/session.dart';
+import 'package:ffmpeg_kit_audio_flutter/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_audio_flutter/ffprobe_kit.dart';
+import 'package:ffmpeg_kit_audio_flutter/return_code.dart';
+import 'package:ffmpeg_kit_audio_flutter/session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
