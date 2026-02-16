@@ -7,38 +7,36 @@ import 'package:ffmpeg_kit_flutter_audio/ffprobe_kit.dart';
 import 'package:ffmpeg_kit_flutter_audio/return_code.dart';
 import 'package:ffmpeg_kit_flutter_audio/session.dart';
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+
+class AudioMetadata {
+  final double duration;
+  final int? sampleRate;
+  final int? bitRate;
+  final int? channels;
+  final String? codecName;
+
+  const AudioMetadata({
+    required this.duration,
+    this.sampleRate,
+    this.bitRate,
+    this.channels,
+    this.codecName,
+  });
+
+  bool get hasSampleRate => sampleRate != null;
+  bool get hasBitRate => bitRate != null;
+  bool get hasChannels => channels != null;
+  bool get hasCodec => codecName != null && codecName!.isNotEmpty;
+}
 
 class AudioProcessor {
-  Future<double?> getDuration(String filePath, {String? ffmpegPath}) async {
-    // 1. Try external ffprobe if ffmpegPath is provided
-    if (ffmpegPath != null &&
-        ffmpegPath.isNotEmpty &&
-        File(ffmpegPath).existsSync()) {
-      // Assume ffprobe is next to ffmpeg
-      final ffprobePath = ffmpegPath.replaceAll("ffmpeg.exe", "ffprobe.exe");
-      if (File(ffprobePath).existsSync()) {
-        try {
-          // ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input.mp3
-          final result = await Process.run(ffprobePath, [
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            filePath,
-          ]);
-          if (result.exitCode == 0) {
-            final dur = double.tryParse(result.stdout.toString().trim());
-            if (dur != null) return dur;
-          }
-        } catch (e) {
-          debugPrint("External ffprobe failed: $e");
-        }
-      }
+  Future<AudioMetadata?> getMetadata(String filePath, {String? ffmpegPath}) async {
+    final metadata = await _probeWithExternal(filePath, ffmpegPath: ffmpegPath);
+    if (metadata != null) {
+      return metadata;
     }
 
-    // 2. Fallback to FFprobeKit (might fail on Windows if plugin is broken)
     try {
       final session = await FFprobeKit.getMediaInformation(filePath);
       final info = session.getMediaInformation();
@@ -46,9 +44,36 @@ class AudioProcessor {
         debugPrint("FFprobe info is null for $filePath");
         return null;
       }
+
       final durationStr = info.getDuration();
-      if (durationStr == null) return null;
-      return double.tryParse(durationStr);
+      final duration = double.tryParse(durationStr ?? "");
+      if (duration == null) {
+        debugPrint("FFprobeKit did not return duration for $filePath");
+        return null;
+      }
+
+      final streams = info.getStreams();
+      dynamic audioStream;
+      for (final stream in streams) {
+        if (stream.getType() == "audio") {
+          audioStream = stream;
+          break;
+        }
+      }
+
+      final sampleRate = _parseToInt(audioStream?.getSampleRate());
+      final bitRate =
+          _parseToInt(audioStream?.getBitrate() ?? info.getBitrate());
+      final channels = _parseToInt(audioStream?.getProperty("channels"));
+      final codecName = audioStream?.getCodec();
+
+      return AudioMetadata(
+        duration: duration,
+        sampleRate: sampleRate,
+        bitRate: bitRate,
+        channels: channels,
+        codecName: codecName,
+      );
     } catch (e) {
       debugPrint("FFprobeKit failed: $e");
       return null;
@@ -61,6 +86,7 @@ class AudioProcessor {
     required double duration,
     required double fadeTailSeconds,
     required double silenceLastSeconds,
+    AudioMetadata? metadata,
   }) {
     final double startFade = max(0, duration - fadeTailSeconds);
     final double silenceStart = max(0, duration - silenceLastSeconds);
@@ -76,7 +102,20 @@ class AudioProcessor {
       filter = "volume=0:enable='gte(t,${silenceStart.toStringAsFixed(3)})'";
     }
 
-    return ["-y", "-i", inputPath, "-af", filter, "-map", "0:a:0", outputPath];
+    final args = ["-y", "-i", inputPath, "-af", filter, "-map", "0:a:0"];
+
+    if (metadata != null) {
+      args.addAll(
+        _buildPreservationArgs(
+          metadata,
+          inputPath: inputPath,
+          outputPath: outputPath,
+        ),
+      );
+    }
+
+    args.add(outputPath);
+    return args;
   }
 
   Future<void> processAudio({
@@ -92,12 +131,15 @@ class AudioProcessor {
   }) async {
     // 1. Get Duration
     onLog("Analysing duration for: $inputPath");
-    final duration = await getDuration(inputPath, ffmpegPath: ffmpegPath);
-    if (duration == null) {
+    final metadata = await getMetadata(inputPath, ffmpegPath: ffmpegPath);
+    if (metadata == null) {
       onComplete(false, "Could not determine duration. (FFprobe failed)");
       return;
     }
-    onLog("Duration: ${duration}s");
+    final duration = metadata.duration;
+    onLog(
+      "Duration: ${duration}s, sampleRate: ${metadata.sampleRate ?? 'unknown'}, bitrate: ${metadata.bitRate ?? 'unknown'}",
+    );
 
     // 2. Build Args
     final args = buildCommandArgs(
@@ -106,6 +148,7 @@ class AudioProcessor {
       duration: duration,
       fadeTailSeconds: fadeTailSeconds,
       silenceLastSeconds: silenceLastSeconds,
+      metadata: metadata,
     );
 
     onLog("Command args: $args");
@@ -197,5 +240,156 @@ class AudioProcessor {
     if (sessionId >= 0) {
       await FFmpegKit.cancel(sessionId);
     }
+  }
+
+  Future<AudioMetadata?> _probeWithExternal(
+    String filePath, {
+    String? ffmpegPath,
+  }) async {
+    if (ffmpegPath == null || ffmpegPath.isEmpty) return null;
+    final ffmpegFile = File(ffmpegPath);
+    if (!ffmpegFile.existsSync()) return null;
+
+    final ffprobePath = _findFfprobePath(ffmpegFile);
+    if (ffprobePath == null) return null;
+
+    try {
+      final result = await Process.run(ffprobePath, [
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-show_format",
+        filePath,
+      ]);
+
+      if (result.exitCode != 0) {
+        debugPrint("External ffprobe failed: ${result.stderr}");
+        return null;
+      }
+
+      final root = jsonDecode(result.stdout.toString());
+      if (root is! Map) return null;
+
+      final format = root["format"] is Map
+          ? Map<String, dynamic>.from(root["format"])
+          : <String, dynamic>{};
+      final streams = root["streams"] is List ? root["streams"] as List : const [];
+
+      Map<String, dynamic>? audioStream;
+      for (final raw in streams) {
+        if (raw is Map && raw["codec_type"] == "audio") {
+          audioStream = Map<String, dynamic>.from(raw);
+          break;
+        }
+      }
+
+      final duration = double.tryParse(format["duration"]?.toString() ?? "");
+      if (duration == null) return null;
+
+      final sampleRate = _parseToInt(audioStream?["sample_rate"]);
+      final bitRate =
+          _parseToInt(audioStream?["bit_rate"] ?? format["bit_rate"]);
+      final channels = _parseToInt(audioStream?["channels"]);
+      final codecName = audioStream?["codec_name"]?.toString();
+
+      return AudioMetadata(
+        duration: duration,
+        sampleRate: sampleRate,
+        bitRate: bitRate,
+        channels: channels,
+        codecName: codecName,
+      );
+    } catch (e) {
+      debugPrint("External ffprobe parse failed: $e");
+      return null;
+    }
+  }
+
+  String? _findFfprobePath(File ffmpegFile) {
+    final ffmpegDir = ffmpegFile.parent.path;
+    final candidates = <String>[
+      p.join(ffmpegDir, "ffprobe${Platform.isWindows ? '.exe' : ''}"),
+      p.join(ffmpegDir, "ffprobe.exe"),
+      p.join(ffmpegDir, "ffprobe"),
+    ];
+
+    for (final path in candidates) {
+      if (File(path).existsSync()) {
+        return path;
+      }
+    }
+    return null;
+  }
+
+  List<String> _buildPreservationArgs(
+    AudioMetadata metadata, {
+    required String inputPath,
+    required String outputPath,
+  }) {
+    final args = <String>[];
+
+    if (metadata.sampleRate != null && metadata.sampleRate! > 0) {
+      args.addAll(["-ar", metadata.sampleRate!.toString()]);
+    }
+    if (metadata.channels != null && metadata.channels! > 0) {
+      args.addAll(["-ac", metadata.channels!.toString()]);
+    }
+
+    if (_shouldApplyBitrate(metadata, outputPath)) {
+      args.addAll(["-b:a", metadata.bitRate!.toString()]);
+    }
+
+    final codec = _codecForOutput(metadata, inputPath, outputPath);
+    if (codec != null) {
+      args.addAll(["-c:a", codec]);
+    }
+
+    return args;
+  }
+
+  String? _codecForOutput(
+    AudioMetadata metadata,
+    String inputPath,
+    String outputPath,
+  ) {
+    if (!metadata.hasCodec) return null;
+    final inputExt = p.extension(inputPath).toLowerCase();
+    final outputExt = p.extension(outputPath).toLowerCase();
+    if (inputExt == outputExt || outputExt.isEmpty) {
+      return metadata.codecName;
+    }
+    return null;
+  }
+
+  bool _shouldApplyBitrate(AudioMetadata metadata, String outputPath) {
+    if (!metadata.hasBitRate) return false;
+    if (_isLosslessCodec(metadata.codecName, outputPath)) {
+      return false;
+    }
+    return true;
+  }
+
+  bool _isLosslessCodec(String? codecName, String outputPath) {
+    final codec = codecName?.toLowerCase() ?? "";
+    if (codec.startsWith("pcm_") ||
+        codec.contains("flac") ||
+        codec.contains("alac")) {
+      return true;
+    }
+    final ext = p.extension(outputPath).toLowerCase();
+    const losslessExts = {".wav", ".aif", ".aiff", ".flac"};
+    return losslessExts.contains(ext);
+  }
+
+  int? _parseToInt(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is double) return value.toInt();
+    if (value is String) {
+      return int.tryParse(value.split(".").first);
+    }
+    return null;
   }
 }

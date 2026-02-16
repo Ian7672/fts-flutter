@@ -1,4 +1,4 @@
-package ian.7672.fade.to.silence.fts
+package ian7672.fts
 
 import io.flutter.embedding.android.FlutterActivity
 
